@@ -1,7 +1,7 @@
 """
-F1 race results -> Discord webhook, using the OpenF1 API (free tier).
-Built to run on GitHub Actions: each run checks once, posts if there's
-a new race result, then exits.
+F1 race results -> Discord webhook (as an embed), using the OpenF1 API.
+Built for GitHub Actions: each run checks once, posts if there's a new
+race result, then exits.
 """
 
 import json
@@ -11,9 +11,13 @@ from datetime import datetime, timezone
 import requests
 
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+FORCE = os.environ.get("FORCE_REPOST", "false").lower() == "true"
 API = "https://api.openf1.org/v1"
-POSTED_FILE = "posted.json"   # remembers which races were already posted
+POSTED_FILE = "posted.json"
+MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
+
+# ---------- helpers ----------
 
 def load_posted():
     try:
@@ -29,15 +33,36 @@ def save_posted(posted):
 
 
 def get(endpoint, **params):
-    """Call an OpenF1 endpoint. Returns None if the data isn't available yet."""
-    r = requests.get(f"{API}/{endpoint}", params=params, timeout=30)
+    """Call an OpenF1 endpoint. Returns None if the data isn't available."""
+    try:
+        r = requests.get(f"{API}/{endpoint}", params=params, timeout=30)
+    except requests.RequestException:
+        return None
     if r.status_code != 200:
         return None
     return r.json()
 
 
+def fmt_race_time(seconds):
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{int(h)}:{int(m):02d}:{s:06.3f}"
+
+
+def fmt_lap_time(seconds):
+    m, s = divmod(seconds, 60)
+    return f"{int(m)}:{s:06.3f}"
+
+
+def fmt_gap(gap):
+    if isinstance(gap, (int, float)):
+        return f"+{gap:.3f}s"
+    return str(gap)
+
+
+# ---------- data ----------
+
 def latest_finished_race():
-    """Find the most recent race session that has already ended."""
     now = datetime.now(timezone.utc)
     sessions = get("sessions", year=now.year, session_name="Race") or []
     finished = [
@@ -48,45 +73,92 @@ def latest_finished_race():
     return max(finished, key=lambda s: s["date_end"]) if finished else None
 
 
-def fmt_time(seconds):
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{int(h)}:{int(m):02d}:{s:06.3f}"
+def fastest_lap(session_key):
+    laps = get("laps", session_key=session_key) or []
+    timed = [l for l in laps if l.get("lap_duration")]
+    return min(timed, key=lambda l: l["lap_duration"]) if timed else None
 
 
-def fmt_gap(gap):
-    if isinstance(gap, (int, float)):
-        return f"+{gap:.3f}s"
-    return str(gap)  # e.g. "+1 LAP"
+def championship_top5(session_key):
+    rows = get("championship_drivers", session_key=session_key) or []
+    rows = [r for r in rows if r.get("position_current")]
+    return sorted(rows, key=lambda r: r["position_current"])[:5]
 
 
-def build_message(session, results, drivers):
-    by_number = {d["driver_number"]: d for d in drivers}
-    lines = []
+# ---------- message ----------
+
+def status_for(r):
+    if r.get("dsq"):
+        return "DSQ"
+    if r.get("dns"):
+        return "DNS"
+    if r.get("dnf"):
+        return "DNF"
+    if r.get("position") == 1:
+        return fmt_race_time(r["duration"])
+    return fmt_gap(r.get("gap_to_leader"))
+
+
+def build_embed(session, results, drivers, meeting, fl, standings):
+    by_num = {d["driver_number"]: d for d in drivers}
     ordered = sorted(results, key=lambda r: r.get("position") or 99)
 
-    for r in ordered:
-        d = by_number.get(r["driver_number"], {})
-        name = d.get("name_acronym", str(r["driver_number"]))
-        team = (d.get("team_name") or "")[:16]
+    def acronym(num):
+        return by_num.get(num, {}).get("name_acronym", str(num))
 
-        if r.get("dsq"):
-            status = "DSQ"
-        elif r.get("dns"):
-            status = "DNS"
-        elif r.get("dnf"):
-            status = "DNF"
-        elif r.get("position") == 1:
-            status = fmt_time(r["duration"])
-        else:
-            status = fmt_gap(r.get("gap_to_leader"))
+    # Podium
+    podium_lines = []
+    for r in ordered[:3]:
+        d = by_num.get(r["driver_number"], {})
+        name = f"{d.get('first_name', '')} {d.get('last_name', '')}".strip() or acronym(r["driver_number"])
+        podium_lines.append(
+            f"{MEDALS.get(r.get('position'), '')} **{name}** · {d.get('team_name', '')} · `{status_for(r)}`"
+        )
 
+    # Rest of the field
+    table = []
+    for r in ordered[3:]:
+        d = by_num.get(r["driver_number"], {})
         pos = str(r["position"]) if r.get("position") else "NC"
-        lines.append(f"{pos:>3}  {name:<4} {team:<16} {status}")
+        team = (d.get("team_name") or "")[:15]
+        table.append(f"{pos:>2}  {acronym(r['driver_number']):<3}  {team:<15} {status_for(r)}")
 
-    title = f"🏁 **{session['location']} {session['year']} — Race Result**"
-    return title + "\n```\n" + "\n".join(lines) + "\n```"
+    description = "\n".join(podium_lines)
+    if table:
+        description += "\n```\n" + "\n".join(table) + "\n```"
 
+    fields = []
+    if fl:
+        fields.append({
+            "name": "⚡ Fastest Lap",
+            "value": f"**{acronym(fl['driver_number'])}** · {fmt_lap_time(fl['lap_duration'])} (lap {fl['lap_number']})",
+            "inline": True,
+        })
+    if standings:
+        lines = []
+        for s in standings:
+            gained = s["points_current"] - (s.get("points_start") or 0)
+            lines.append(f"{s['position_current']}. **{acronym(s['driver_number'])}** {s['points_current']:g} pts (+{gained:g})")
+        fields.append({"name": "🏆 Championship", "value": "\n".join(lines), "inline": True})
+
+    winner = by_num.get(ordered[0]["driver_number"], {}) if ordered else {}
+    colour = int(winner.get("team_colour") or "E10600", 16)
+
+    title_name = (meeting or {}).get("meeting_name") or f"{session['location']} Grand Prix"
+    embed = {
+        "title": f"🏁 {title_name} {session['year']}",
+        "description": description,
+        "color": colour,
+        "fields": fields,
+        "footer": {"text": f"{session['circuit_short_name']} · Provisional result · Data via OpenF1"},
+        "timestamp": session["date_end"],
+    }
+    if meeting and meeting.get("country_flag"):
+        embed["thumbnail"] = {"url": meeting["country_flag"]}
+    return embed
+
+
+# ---------- main ----------
 
 def main():
     posted = load_posted()
@@ -95,23 +167,29 @@ def main():
     if not race:
         print("No finished race found.")
         return
-    if race["session_key"] in posted:
-        print(f"Already posted session {race['session_key']}.")
+    key = race["session_key"]
+    if key in posted and not FORCE:
+        print(f"Already posted session {key}.")
         return
 
-    results = get("session_result", session_key=race["session_key"])
+    results = get("session_result", session_key=key)
     if not results:
         print("Results not available yet. Will check again next run.")
         return
 
-    drivers = get("drivers", session_key=race["session_key"]) or []
-    message = build_message(race, results, drivers)
-    resp = requests.post(WEBHOOK_URL, json={"content": message}, timeout=30)
+    drivers = get("drivers", session_key=key) or []
+    meetings = get("meetings", meeting_key=race["meeting_key"]) or []
+    meeting = meetings[0] if meetings else None
+    fl = fastest_lap(key)
+    standings = championship_top5(key)
+
+    embed = build_embed(race, results, drivers, meeting, fl, standings)
+    resp = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
     resp.raise_for_status()
 
-    posted.add(race["session_key"])
+    posted.add(key)
     save_posted(posted)
-    print(f"Posted results for session {race['session_key']}.")
+    print(f"Posted results for session {key}.")
 
 
 if __name__ == "__main__":
