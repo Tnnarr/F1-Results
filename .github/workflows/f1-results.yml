@@ -3,7 +3,12 @@ name: Post F1 results
 on:
   schedule:
     - cron: "*/15 * * * 0,6"   # every 15 min on Saturdays and Sundays (UTC)
-  workflow_dispatch:            # adds a "Run workflow" button for testing
+  workflow_dispatch:
+    inputs:
+      force_repost:
+        description: "Repost the latest race even if it was already posted"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,9 +21,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -28,6 +33,7 @@ jobs:
         run: python f1_results.py
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FORCE_REPOST: ${{ inputs.force_repost || 'false' }}
 
       - name: Save which races were posted
         run: |
