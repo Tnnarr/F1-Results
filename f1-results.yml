@@ -1,0 +1,51 @@
+name: Post F1 results
+
+on:
+  schedule:
+    - cron: "*/15 * * * 0,1,6"   # every 15 min on Sat, Sun and Mon (UTC)
+  workflow_dispatch:
+    inputs:
+      force_repost:
+        description: "Repost the latest race even if it was already posted"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: f1-results
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests pymupdf
+
+      - name: Post results card
+        run: python f1_results.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FORCE_REPOST: ${{ inputs.force_repost || 'false' }}
+
+      - name: Post FIA classification image
+        if: always()
+        run: python fia_classification.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FORCE_REPOST: ${{ inputs.force_repost || 'false' }}
+
+      - name: Save which races were posted
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || (git commit -m "Update posted races" && git push)
