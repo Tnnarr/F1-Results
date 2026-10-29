@@ -2,7 +2,7 @@ name: Post F1 results
 
 on:
   schedule:
-    - cron: "*/15 * * * 0,1,6"   # every 15 min on Sat, Sun and Mon (UTC)
+    - cron: "*/20 * * * 0,1,5,6"   # every 20 min, Friday to Monday (UTC)
   workflow_dispatch:
     inputs:
       force_repost:
@@ -35,7 +35,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           FORCE_REPOST: ${{ inputs.force_repost || 'false' }}
 
-      - name: Post FIA classification image
+      - name: Post FIA documents
         if: always()
         run: python fia_classification.py
         env:
