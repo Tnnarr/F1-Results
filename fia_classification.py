@@ -1,15 +1,18 @@
 """
-Posts official FIA documents (classifications, starting grids) to Discord as images,
-as soon as the FIA publishes them. Runs on GitHub Actions next to f1_results.py.
+Posts official FIA documents to Discord as images, as soon as the FIA publishes them:
+practice, qualifying, sprint and race classifications, starting grids, and stewards'
+decisions. Runs on GitHub Actions next to f1_results.py.
 
-To turn a document type on or off, change True/False in the DOCUMENTS list below.
+To turn something on or off, change True/False in the DOCUMENTS or STEWARDS lists below.
 """
 
 import json
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 
 import pymupdf as fitz  # PyMuPDF
 import requests
@@ -19,13 +22,28 @@ import requests
 # (file name used by the FIA, title shown in Discord, on/off)
 # ------------------------------------------------------------------
 DOCUMENTS = [
-    ("final_sprint_qualifying_classification", "⏱️ Sprint Qualifying Classification", True),
-    ("final_sprint_starting_grid",             "🚦 Sprint Starting Grid",              True),
-    ("final_sprint_classification",            "🏁 Sprint Classification",             True),
-    ("final_qualifying_classification",        "⏱️ Qualifying Classification",         True),
-    ("final_starting_grid",                    "🚦 Starting Grid",                     True),
-    ("provisional_race_classification",        "📝 Provisional Race Classification",   False),
-    ("final_race_classification",              "🏁 Final Race Classification",         True),
+    ("free_practice_1_classification",         "🔧 Free Practice 1 Classification",     True),
+    ("free_practice_2_classification",         "🔧 Free Practice 2 Classification",     True),
+    ("free_practice_3_classification",         "🔧 Free Practice 3 Classification",     True),
+    ("final_sprint_qualifying_classification", "⏱️ Sprint Qualifying Classification",   True),
+    ("final_sprint_starting_grid",             "🚦 Sprint Starting Grid",               True),
+    ("final_sprint_classification",            "🏁 Sprint Classification",              True),
+    ("final_qualifying_classification",        "⏱️ Qualifying Classification",          True),
+    ("final_starting_grid",                    "🚦 Starting Grid",                      True),
+    ("provisional_race_classification",        "📝 Provisional Race Classification",    False),
+    ("final_race_classification",              "🏁 Final Race Classification",          True),
+]
+
+# ------------------------------------------------------------------
+# Stewards' documents. These have a unique name each time, so the bot
+# reads the FIA documents page to find them.
+# (type at the start of the FIA title, label shown in Discord, on/off)
+# ------------------------------------------------------------------
+STEWARDS = [
+    ("decision",     "⚖️ Stewards' Decision", True),   # penalties, investigations, "no further action"
+    ("summons",      "📣 Summons",            True),   # driver/team called to the stewards
+    ("offence",      "🚨 Offence",            True),
+    ("infringement", "🚫 Infringement",       False),  # mostly deleted lap times; lots of these
 ]
 
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
@@ -33,6 +51,7 @@ FORCE = os.environ.get("FORCE_REPOST", "false").lower() == "true"
 OPENF1 = "https://api.openf1.org/v1"
 FIA_BASE = "https://www.fia.com/system/files/decision-document/"
 POSTED_FILE = "fia_posted.json"
+LISTING_URL = "https://www.fia.com/documents/championships/fia-formula-one-world-championship-14"
 HEADERS = {"User-Agent": "Mozilla/5.0 (F1 Discord results bot)"}
 WEEKEND_WINDOW = timedelta(days=3)  # stop checking a race weekend 3 days after its last session
 
@@ -94,11 +113,76 @@ def pdf_to_images(pdf_bytes):
     return [doc[i].get_pixmap(matrix=fitz.Matrix(2.5, 2.5)).tobytes("png") for i in pages]
 
 
+def listed_documents():
+    """All PDF documents linked on the FIA's F1 documents page (latest race weekend)."""
+    try:
+        r = requests.get(LISTING_URL, headers=HEADERS, timeout=30)
+    except requests.RequestException as e:
+        print(f"Couldn't read FIA documents page: {e}")
+        return []
+    if r.status_code != 200:
+        print(f"Couldn't read FIA documents page: HTTP {r.status_code}")
+        return []
+    links = re.findall(r'href="([^"]*decision-document/[^"]+?\.pdf)"[^>]*>(.*?)</a>',
+                       r.text, flags=re.IGNORECASE | re.DOTALL)
+    docs, seen = [], set()
+    for href, inner in links:
+        url = href if href.startswith("http") else "https://www.fia.com" + href
+        if url in seen:
+            continue
+        seen.add(url)
+        name = slugify(unquote(url.rsplit("/", 1)[1])[:-4])
+        # Title as shown on the FIA page, e.g. "Doc 26 - Decision - Car 44 - Alleged incident with car 3"
+        text = re.sub(r"<[^>]+>", " ", inner)
+        text = re.sub(r"Published on.*", "", text, flags=re.DOTALL)
+        text = re.sub(r"^\s*Doc\s*\d+\s*-\s*", "", " ".join(text.split()))
+        docs.append((url, name, text.strip()))
+    return docs
+
+
+def nice_title(rest):
+    # "decision_-_car_44_-_alleged_incident_with_car_3" -> "Decision - Car 44 - Alleged incident with car 3"
+    parts = [p.replace("_", " ").strip() for p in rest.split("_-_")]
+    return " - ".join(p[:1].upper() + p[1:] for p in parts if p)
+
+
+def post_stewards_docs(prefix, meeting_name, year, posted):
+    enabled = {t: label for t, label, on in STEWARDS if on}
+    if not enabled:
+        return
+    for url, name, page_title in listed_documents():
+        if not name.startswith(prefix):
+            continue  # a different event (e.g. F2/F3 or a previous race)
+        rest = name[len(prefix):]
+        doc_type = rest.split("_-_")[0]
+        if doc_type not in enabled:
+            continue
+        key = name
+        if key in posted and not FORCE:
+            continue
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+        except requests.RequestException:
+            continue
+        if r.status_code != 200 or r.content[:4] != b"%PDF":
+            continue
+        full = page_title if " - " in page_title else nice_title(rest)
+        title = f"{enabled[doc_type]}: {full.split(' - ', 1)[-1]}"
+        post(title, meeting_name, year, url, pdf_to_images(r.content))
+        posted.add(key)
+        save_posted(posted)
+        print(f"Posted: {title}")
+
+
 def post(title, meeting_name, year, url, images):
     files = {f"files[{i}]": (f"page_{i + 1}.png", img, "image/png") for i, img in enumerate(images)}
     payload = {"content": f"**{title} — {meeting_name} {year}**\n📄 <{url}>"}
     r = requests.post(WEBHOOK_URL, data={"payload_json": json.dumps(payload)}, files=files, timeout=60)
+    if r.status_code == 429:  # Discord says slow down: wait and try once more
+        time.sleep(float(r.headers.get("Retry-After", 5)) + 1)
+        r = requests.post(WEBHOOK_URL, data={"payload_json": json.dumps(payload)}, files=files, timeout=60)
     r.raise_for_status()
+    time.sleep(2)  # stay well under Discord's webhook rate limit
 
 
 def main():
@@ -135,6 +219,8 @@ def main():
         posted.add(key)
         save_posted(posted)
         print(f"Posted: {title}")
+
+    post_stewards_docs(prefix, meeting_name, session["year"], posted)
 
 
 if __name__ == "__main__":
