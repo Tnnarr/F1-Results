@@ -150,7 +150,10 @@ def post_stewards_docs(prefix, meeting_name, year, posted):
     enabled = {t: label for t, label, on in STEWARDS if on}
     if not enabled:
         return
-    for url, name, page_title in listed_documents():
+    docs = listed_documents()
+    this_race = [d for d in docs if d[1].startswith(prefix)]
+    print(f"FIA documents page: {len(docs)} documents listed, {len(this_race)} for this race")
+    for url, name, page_title in docs:
         if not name.startswith(prefix):
             continue  # a different event (e.g. F2/F3 or a previous race)
         rest = name[len(prefix):]
