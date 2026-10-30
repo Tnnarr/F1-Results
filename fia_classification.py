@@ -17,6 +17,8 @@ from urllib.parse import unquote
 import pymupdf as fitz  # PyMuPDF
 import requests
 
+from common import openf1, send, weekend_label
+
 # ------------------------------------------------------------------
 # Which FIA documents to post. Set to False to turn one off.
 # (file name used by the FIA, title shown in Discord, on/off)
@@ -62,9 +64,10 @@ TECHNICAL = [
 # Post a summary of each team's car upgrades (FIA "Car Presentation Submissions", Friday morning)
 UPGRADES_ENABLED = True
 
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+# Turn stewards' decisions into easy-to-read cards (False = post the PDF as an image instead)
+PENALTY_CARDS = True
+
 FORCE = os.environ.get("FORCE_REPOST", "false").lower() == "true"
-OPENF1 = "https://api.openf1.org/v1"
 FIA_BASE = "https://www.fia.com/system/files/decision-document/"
 POSTED_FILE = "fia_posted.json"
 LISTING_URL = "https://www.fia.com/documents/championships/fia-formula-one-world-championship-14"
@@ -83,11 +86,6 @@ def load_posted():
 def save_posted(posted):
     with open(POSTED_FILE, "w") as f:
         json.dump(sorted(posted), f)
-
-
-def openf1(endpoint, **params):
-    r = requests.get(f"{OPENF1}/{endpoint}", params=params, timeout=30)
-    return r.json() if r.status_code == 200 else None
 
 
 def current_weekend():
@@ -124,11 +122,87 @@ def fetch_pdf(file_base):
     return None, None
 
 
+def content_pages(doc):
+    """Page numbers of the document itself, skipping the FIA cover sheet if there is one."""
+    first = doc[0].get_text()
+    start = 1 if doc.page_count > 1 and "Enclosed" in first and "Title" in first else 0
+    return list(range(start, doc.page_count))
+
+
 def pdf_to_images(pdf_bytes):
-    """Render the sheet itself (skips page 1, the stewards' cover letter)."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = range(1, min(doc.page_count, 3)) if doc.page_count > 1 else range(0, 1)
+    pages = content_pages(doc)[:2]
     return [doc[i].get_pixmap(matrix=fitz.Matrix(2.5, 2.5)).tobytes("png") for i in pages]
+
+
+# ---------------- Penalty cards ----------------
+
+DECISION_LABELS = ["No / Driver", "Competitor", "Time", "Session", "Fact",
+                   "Infringement", "Offence", "Decision", "Reason"]
+DECISION_STOP = ("Competitors are reminded", "N.B.")
+
+
+def parse_decision(pdf_bytes):
+    """Pull the key lines out of a stewards' decision. Returns {} if the layout isn't recognised."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    text = "\n".join(doc[i].get_text() for i in content_pages(doc))
+    fields, current = {}, None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if current is None and not line.startswith("No / Driver"):
+            continue  # skip the letterhead (it has its own Date/Time lines)
+        if line.startswith(DECISION_STOP):
+            break
+        label = None
+        if current != "Reason":  # Reason is always last, so everything after it belongs to it
+            for l in DECISION_LABELS:
+                if line.startswith(l) and (len(line) == len(l) or not line[len(l)].islower()):
+                    label = l
+                    break
+        if label and label not in fields:
+            current = label
+            fields[current] = line[len(label):].strip(" :")
+        elif current:
+            fields[current] = (fields[current] + " " + line).strip()
+    return fields if fields.get("Decision") else {}
+
+
+def short(text, limit=1000):
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def penalty_embed(fields, url, meeting_name, year):
+    who = fields.get("No / Driver", "")
+    m = re.match(r"(\d+)\s*-\s*(.+)", who)
+    title = f"⚖️ Car {m.group(1)} – {m.group(2)}" if m else f"⚖️ {who or 'Stewards’ Decision'}"
+    decision = short(fields.get("Decision", ""), 300)
+    no_action = "no further action" in decision.lower()
+
+    embed = {
+        "title": title[:256],
+        "url": url,
+        "description": f"**{'✅' if no_action else '🚨'} {decision}**",
+        "color": 0x95A5A6 if no_action else 0xE10600,
+        "fields": [],
+        "footer": {"text": f"{meeting_name} {year} · FIA Stewards"},
+    }
+    if fields.get("Competitor"):
+        embed["fields"].append({"name": "Team", "value": short(fields["Competitor"], 100), "inline": True})
+    if fields.get("Session"):
+        embed["fields"].append({"name": "Session", "value": short(fields["Session"], 100), "inline": True})
+    if fields.get("Time"):
+        embed["fields"].append({"name": "Time", "value": short(fields["Time"], 50), "inline": True})
+    if fields.get("Fact"):
+        embed["fields"].append({"name": "What happened", "value": short(fields["Fact"])})
+    breach = fields.get("Infringement") or fields.get("Offence") or fields.get("Breach")
+    if breach:
+        embed["fields"].append({"name": "Rule", "value": short(breach, 300)})
+    if fields.get("Reason"):
+        embed["fields"].append({"name": "Stewards' reasoning", "value": short(fields["Reason"])})
+    return embed
 
 
 def listed_documents():
@@ -210,10 +284,18 @@ def post_stewards_docs(prefix, meeting_name, year, posted):
             detail = full if len(full) <= 90 else ""
             title = f"{label}: {detail}" if detail else label
 
-        post(title, meeting_name, year, url, pdf_to_images(r.content))
+        category = "stewards" if kind == "stewards" else "technical"
+        doc_type = rest.split("_-_")[0]
+        fields = parse_decision(r.content) if (PENALTY_CARDS and kind == "stewards"
+                                               and doc_type in ("decision", "offence", "infringement")) else {}
+        if fields:
+            send(category, {"embeds": [penalty_embed(fields, url, meeting_name, year)]},
+                 weekend=weekend_label(meeting_name, year))
+        else:
+            post(title, meeting_name, year, url, pdf_to_images(r.content), category)
         posted.add(key)
         save_posted(posted)
-        print(f"Posted: {title}")
+        print(f"Posted: {title}" + (" (penalty card)" if fields else ""))
 
 
 TEAMS = [
@@ -333,27 +415,17 @@ def post_upgrades(prefix, meeting_name, year, posted):
         "fields": fields[:25],
         "footer": {"text": "FIA Car Presentation Submissions"},
     }
-    r = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
-    if r.status_code == 429:
-        time.sleep(float(r.headers.get("Retry-After", 5)) + 1)
-        r = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
-    r.raise_for_status()
-    time.sleep(2)
+    send("technical", {"embeds": [embed]}, weekend=weekend_label(meeting_name, year))
 
     posted.add(key)
     save_posted(posted)
     print(f"Posted: 🔧 Car Upgrades ({sum(len(v) for v in parts.values())} parts from {len(parts)} teams)")
 
 
-def post(title, meeting_name, year, url, images):
+def post(title, meeting_name, year, url, images, category="results"):
     files = {f"files[{i}]": (f"page_{i + 1}.png", img, "image/png") for i, img in enumerate(images)}
     payload = {"content": f"**{title} — {meeting_name} {year}**\n📄 <{url}>"}
-    r = requests.post(WEBHOOK_URL, data={"payload_json": json.dumps(payload)}, files=files, timeout=60)
-    if r.status_code == 429:  # Discord says slow down: wait and try once more
-        time.sleep(float(r.headers.get("Retry-After", 5)) + 1)
-        r = requests.post(WEBHOOK_URL, data={"payload_json": json.dumps(payload)}, files=files, timeout=60)
-    r.raise_for_status()
-    time.sleep(2)  # stay well under Discord's webhook rate limit
+    send(category, payload, files=files, weekend=weekend_label(meeting_name, year))
 
 
 def main():
