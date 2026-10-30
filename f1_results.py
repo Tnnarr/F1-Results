@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 import requests
 
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+from common import send, weekend_label
+
 FORCE = os.environ.get("FORCE_REPOST", "false").lower() == "true"
 API = "https://api.openf1.org/v1"
 POSTED_FILE = "posted.json"
@@ -184,8 +185,8 @@ def main():
     standings = championship_top5(key)
 
     embed = build_embed(race, results, drivers, meeting, fl, standings)
-    resp = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
-    resp.raise_for_status()
+    meeting_name = (meeting or {}).get("meeting_name") or f"{race['location']} Grand Prix"
+    send("results", {"embeds": [embed]}, weekend=weekend_label(meeting_name, race["year"]))
 
     posted.add(key)
     save_posted(posted)
