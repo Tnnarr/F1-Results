@@ -46,6 +46,22 @@ STEWARDS = [
     ("infringement", "🚫 Infringement",       False),  # mostly deleted lap times; lots of these
 ]
 
+# ------------------------------------------------------------------
+# Technical documents, also found on the FIA documents page.
+# Matched by a word that appears anywhere in the FIA file name.
+# (word in the file name, label shown in Discord, on/off)
+# ------------------------------------------------------------------
+TECHNICAL = [
+    ("pu_elements",        "🔋 Power Unit Elements Used",     True),   # season PU usage table + new parts
+    ("power_unit",         "🔋 Power Unit Elements",          True),
+    ("parc_ferme",         "🔧 Parc Fermé Changes",           True),   # setup/parts changed under parc fermé
+    ("technical_delegate", "🛠️ Technical Delegate's Report",  True),   # other technical reports
+    ("scrutineering",      "🔍 Scrutineering",                False),  # routine paperwork
+]
+
+# Post a summary of each team's car upgrades (FIA "Car Presentation Submissions", Friday morning)
+UPGRADES_ENABLED = True
+
 WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 FORCE = os.environ.get("FORCE_REPOST", "false").lower() == "true"
 OPENF1 = "https://api.openf1.org/v1"
@@ -75,11 +91,13 @@ def openf1(endpoint, **params):
 
 
 def current_weekend():
-    """The race weekend whose sessions have most recently started."""
+    """The current race weekend: the latest one with a session starting before two days from now
+    (so documents published before FP1, like the upgrades list, are picked up)."""
     now = datetime.now(timezone.utc)
     sessions = openf1("sessions", year=now.year) or []
     started = [s for s in sessions
-               if not s.get("is_cancelled") and datetime.fromisoformat(s["date_start"]) < now]
+               if not s.get("is_cancelled")
+               and datetime.fromisoformat(s["date_start"]) < now + timedelta(days=2)]
     if not started:
         return None, None
     latest = max(started, key=lambda s: s["date_start"])
@@ -146,22 +164,34 @@ def nice_title(rest):
     return " - ".join(p[:1].upper() + p[1:] for p in parts if p)
 
 
+def label_for(rest):
+    """Which label (if any) a document on the FIA page should be posted under."""
+    doc_type = rest.split("_-_")[0]
+    for t, label, on in STEWARDS:
+        if on and doc_type == t:
+            return label, "stewards"
+    for word, label, on in TECHNICAL:
+        if on and word in rest:
+            # A stewards' ruling about PU/parc fermé changes (e.g. a pit lane start) is still a penalty
+            if doc_type in {t for t, _, _ in STEWARDS}:
+                return "⚖️ Stewards' Decision", "stewards"
+            return label, "technical"
+    return None, None
+
+
 def post_stewards_docs(prefix, meeting_name, year, posted):
-    enabled = {t: label for t, label, on in STEWARDS if on}
-    if not enabled:
-        return
+    """Stewards' decisions and technical reports, found on the FIA documents page."""
     docs = listed_documents()
     this_race = [d for d in docs if d[1].startswith(prefix)]
     print(f"FIA documents page: {len(docs)} documents listed, {len(this_race)} for this race")
     print(f"  Looking for names starting with: {prefix}")
     for _, name, _ in docs[:5]:
         print(f"  Listed: {name}")
-    for url, name, page_title in docs:
-        if not name.startswith(prefix):
-            continue  # a different event (e.g. F2/F3 or a previous race)
+
+    for url, name, page_title in this_race:
         rest = name[len(prefix):]
-        doc_type = rest.split("_-_")[0]
-        if doc_type not in enabled:
+        label, kind = label_for(rest)
+        if not label:
             continue
         key = name
         if key in posted and not FORCE:
@@ -172,12 +202,147 @@ def post_stewards_docs(prefix, meeting_name, year, posted):
             continue
         if r.status_code != 200 or r.content[:4] != b"%PDF":
             continue
-        full = page_title if " - " in page_title else nice_title(rest)
-        title = f"{enabled[doc_type]}: {full.split(' - ', 1)[-1]}"
+
+        full = page_title or nice_title(rest)
+        if kind == "stewards":
+            title = f"{label}: {full.split(' - ', 1)[-1]}"
+        else:
+            detail = full if len(full) <= 90 else ""
+            title = f"{label}: {detail}" if detail else label
+
         post(title, meeting_name, year, url, pdf_to_images(r.content))
         posted.add(key)
         save_posted(posted)
         print(f"Posted: {title}")
+
+
+TEAMS = [
+    ("McLaren", ["mclaren"]),
+    ("Mercedes", ["mercedes"]),
+    ("Red Bull", ["red bull", "rbr "]),
+    ("Ferrari", ["ferrari"]),
+    ("Williams", ["williams"]),
+    ("Racing Bulls", ["racing bulls", "vcarb", "visa cash app"]),
+    ("Aston Martin", ["aston martin"]),
+    ("Haas", ["haas"]),
+    ("Audi", ["audi", "sauber"]),
+    ("Alpine", ["alpine"]),
+    ("Cadillac", ["cadillac"]),
+]
+
+
+def clean(cell):
+    return " ".join(str(cell or "").split())
+
+
+def find_team(header_text):
+    """Which team a page belongs to, based on the top of the page."""
+    text = header_text.lower()
+    best = None
+    for team, keys in TEAMS:
+        for k in keys:
+            i = text.find(k)
+            if i != -1 and (best is None or i < best[0]):
+                best = (i, team)
+    return best[1] if best else None
+
+
+def parse_upgrades(pdf_bytes):
+    """Returns ({team: [(component, reason), ...]}, [teams with no updates])."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    parts, no_updates, current = {}, [], None
+
+    for page in list(doc)[1:]:  # page 1 is the FIA cover letter
+        text = page.get_text()
+        team = find_team(text[:400])
+        if team:
+            current = team
+
+        try:
+            tables = page.find_tables().tables
+        except Exception:
+            tables = []
+
+        rows_found = []
+        for table in tables:
+            # Read each cell's text straight from the page (keeps spaces between words)
+            rows = []
+            for row in table.rows:
+                rows.append([clean(page.get_text("text", clip=bbox)) if bbox else "" for bbox in row.cells])
+            comp_col = reason_col = None
+            for cells in rows:
+                squashed = [c.lower().replace(" ", "") for c in cells]
+                if comp_col is None:
+                    for i, c in enumerate(squashed):
+                        if "updatedcomponent" in c:
+                            comp_col = i
+                        elif "primaryreason" in c:
+                            reason_col = i
+                    continue
+                comp = cells[comp_col] if comp_col < len(cells) else ""
+                reason = cells[reason_col] if reason_col is not None and reason_col < len(cells) else ""
+                if comp and not comp.isdigit():
+                    rows_found.append((comp, reason))
+
+        if rows_found and current:
+            parts.setdefault(current, []).extend(rows_found)
+        elif team and "no update" in text.lower() and team not in parts and team not in no_updates:
+            no_updates.append(team)
+
+    return parts, no_updates
+
+
+def post_upgrades(prefix, meeting_name, year, posted):
+    key = prefix + "car_presentation_submissions"
+    if key in posted and not FORCE:
+        return
+    url, pdf = fetch_pdf(key)
+    if not pdf:
+        print("Not published yet: 🔧 Car Upgrades")
+        return
+
+    parts, no_updates = parse_upgrades(pdf)
+    fields = []
+    for team, _ in TEAMS:
+        if team not in parts:
+            continue
+        lines, total = [], 0
+        for comp, reason in parts[team]:
+            reason = reason.split(" - ")[0] if reason else ""
+            line = f"• {comp[:60]}" + (f" *({reason[:30]})*" if reason else "")
+            if total + len(line) + 1 > 950:
+                lines.append(f"…and more in the PDF")
+                break
+            lines.append(line)
+            total += len(line) + 1
+        fields.append({"name": f"{team} ({len(parts[team])})", "value": "\n".join(lines), "inline": False})
+
+    description = f"[📄 Full FIA document]({url})"
+    if no_updates:
+        description += f"\n\n**No upgrades:** {', '.join(no_updates)}"
+    missing = [t for t, _ in TEAMS if t not in parts and t not in no_updates]
+    if missing and parts:
+        description += f"\n**See PDF for:** {', '.join(missing)}"
+    if not parts:
+        description += "\n\nCouldn't read the upgrade tables this time. Open the full document for details."
+
+    embed = {
+        "title": f"🔧 Car Upgrades — {meeting_name} {year}",
+        "description": description,
+        "color": 0xE10600,
+        "fields": fields[:25],
+        "footer": {"text": "FIA Car Presentation Submissions"},
+    }
+    r = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
+    if r.status_code == 429:
+        time.sleep(float(r.headers.get("Retry-After", 5)) + 1)
+        r = requests.post(WEBHOOK_URL, json={"embeds": [embed]}, timeout=30)
+    r.raise_for_status()
+    time.sleep(2)
+
+    posted.add(key)
+    save_posted(posted)
+    print(f"Posted: 🔧 Car Upgrades ({sum(len(v) for v in parts.values())} parts from {len(parts)} teams)")
 
 
 def post(title, meeting_name, year, url, images):
@@ -208,6 +373,9 @@ def main():
         return
     meeting_name = meetings[0]["meeting_name"]
     prefix = f"{session['year']}_{slugify(meeting_name)}_-_"
+
+    if UPGRADES_ENABLED:
+        post_upgrades(prefix, meeting_name, session["year"], posted)
 
     for doc_name, title, enabled in DOCUMENTS:
         if not enabled:
