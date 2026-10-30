@@ -45,8 +45,12 @@ STEWARDS = [
     ("decision",     "⚖️ Stewards' Decision", True),   # penalties, investigations, "no further action"
     ("summons",      "📣 Summons",            True),   # driver/team called to the stewards
     ("offence",      "🚨 Offence",            True),
-    ("infringement", "🚫 Infringement",       True),  # mostly deleted lap times; lots of these
+    ("infringement", "🚫 Infringement",       True),   # fines like pit lane speeding, deleted lap times
 ]
+
+# Skip the most common, low-interest infringements: lap times deleted for track limits.
+# (Deleted lap times for double yellow flags are still posted.)
+SKIP_TRACK_LIMITS = True
 
 # ------------------------------------------------------------------
 # Technical documents, also found on the FIA documents page.
@@ -241,6 +245,9 @@ def nice_title(rest):
 def label_for(rest):
     """Which label (if any) a document on the FIA page should be posted under."""
     doc_type = rest.split("_-_")[0]
+    if (SKIP_TRACK_LIMITS and doc_type == "infringement"
+            and "deleted_lap_time" in rest and "double_yellow" not in rest):
+        return None, None
     for t, label, on in STEWARDS:
         if on and doc_type == t:
             return label, "stewards"
