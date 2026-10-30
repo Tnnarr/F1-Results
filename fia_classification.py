@@ -45,7 +45,7 @@ STEWARDS = [
     ("decision",     "⚖️ Stewards' Decision", True),   # penalties, investigations, "no further action"
     ("summons",      "📣 Summons",            True),   # driver/team called to the stewards
     ("offence",      "🚨 Offence",            True),
-    ("infringement", "🚫 Infringement",       False),  # mostly deleted lap times; lots of these
+    ("infringement", "🚫 Infringement",       True),  # mostly deleted lap times; lots of these
 ]
 
 # ------------------------------------------------------------------
