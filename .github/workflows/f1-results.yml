@@ -1,8 +1,8 @@
 name: Post F1 results
 
+# Started every few minutes by cron-job.org (and by the Run workflow button).
+# GitHub's own schedule is not used, because it skips runs and caused overlaps.
 on:
-  schedule:
-    - cron: "*/20 * * * 0,1,5,6"   # every 20 min, Friday to Monday (UTC)
   workflow_dispatch:
     inputs:
       force_repost:
@@ -27,7 +27,11 @@ jobs:
       DISCORD_WEBHOOK_REMINDERS: ${{ secrets.DISCORD_WEBHOOK_REMINDERS }}
       FORCE_REPOST: ${{ inputs.force_repost || 'false' }}
     steps:
+      # Always start from the newest version of the repo, so the list of
+      # already-posted items is up to date (prevents double posts).
       - uses: actions/checkout@v5
+        with:
+          ref: main
 
       - uses: actions/setup-python@v6
         with:
@@ -53,4 +57,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet || (git commit -m "Update posted items" && git push)
+          if git diff --cached --quiet; then
+            echo "Nothing new to save."
+            exit 0
+          fi
+          git commit -m "Update posted items"
+          for attempt in 1 2 3; do
+            git pull --rebase -X theirs origin main && git push && exit 0
+            sleep 5
+          done
+          echo "Couldn't save after 3 tries"
+          exit 1
