@@ -146,10 +146,24 @@ DECISION_LABELS = ["No / Driver", "Competitor", "Time", "Session", "Fact",
 DECISION_STOP = ("Competitors are reminded", "N.B.")
 
 
+def visual_lines(page):
+    """Rebuild the page's text line by line as it looks on screen (left to right),
+    so a label and its value on the same row end up on the same line."""
+    words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_no)
+    rows = []
+    for w in sorted(words, key=lambda w: ((w[1] + w[3]) / 2, w[0])):
+        mid = (w[1] + w[3]) / 2
+        if rows and abs(rows[-1][0] - mid) <= 3:
+            rows[-1][1].append(w)
+        else:
+            rows.append([mid, [w]])
+    return "\n".join(" ".join(w[4] for w in sorted(r[1], key=lambda w: w[0])) for r in rows)
+
+
 def parse_decision(pdf_bytes):
     """Pull the key lines out of a stewards' decision. Returns {} if the layout isn't recognised."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    text = "\n".join(doc[i].get_text() for i in content_pages(doc))
+    text = "\n".join(visual_lines(doc[i]) for i in content_pages(doc))
     fields, current = {}, None
     for raw in text.splitlines():
         line = raw.strip()
