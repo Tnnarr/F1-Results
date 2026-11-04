@@ -21,6 +21,28 @@
    "year": 2026
   }
  ],
+ "meetings?meeting_key=1299": [
+  {
+   "circuit_image": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Track%20icons%204x3/Brazil%20carbon.png",
+   "circuit_info_url": "https://api.multiviewer.app/api/v1/circuits/14/2026",
+   "circuit_key": 14,
+   "circuit_short_name": "Interlagos",
+   "circuit_type": "Permanent",
+   "country_code": "BRA",
+   "country_flag": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Flags%2016x9/brazil-flag.png",
+   "country_key": 10,
+   "country_name": "Brazil",
+   "date_end": "2026-11-08T19:00:00+00:00",
+   "date_start": "2026-11-06T15:30:00+00:00",
+   "gmt_offset": "-03:00:00",
+   "is_cancelled": false,
+   "location": "S\u00e3o Paulo",
+   "meeting_key": 1299,
+   "meeting_name": "S\u00e3o Paulo Grand Prix",
+   "meeting_official_name": "FORMULA 1 MSC CRUISES GRANDE PR\u00caMIO DE S\u00c3O PAULO 2026",
+   "year": 2026
+  }
+ ],
  "sessions?year=2026": [
   {
    "circuit_key": 63,
