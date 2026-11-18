@@ -43,6 +43,28 @@
    "year": 2026
   }
  ],
+ "meetings?meeting_key=1300": [
+  {
+   "circuit_image": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Track%20icons%204x3/Las Vegas%20carbon.png",
+   "circuit_info_url": "https://api.multiviewer.app/api/v1/circuits/152/2026",
+   "circuit_key": 152,
+   "circuit_short_name": "Las Vegas",
+   "circuit_type": "Temporary - Street",
+   "country_code": "USA",
+   "country_flag": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Flags%2016x9/united-states-flag.png",
+   "country_key": 19,
+   "country_name": "United States",
+   "date_end": "2026-11-22T06:00:00+00:00",
+   "date_start": "2026-11-20T00:30:00+00:00",
+   "gmt_offset": "-08:00:00",
+   "is_cancelled": false,
+   "location": "Las Vegas",
+   "meeting_key": 1300,
+   "meeting_name": "Las Vegas Grand Prix",
+   "meeting_official_name": "FORMULA 1 HEINEKEN LAS VEGAS GRAND PRIX 2026",
+   "year": 2026
+  }
+ ],
  "sessions?year=2026": [
   {
    "circuit_key": 63,
