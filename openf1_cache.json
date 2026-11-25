@@ -65,6 +65,28 @@
    "year": 2026
   }
  ],
+ "meetings?meeting_key=1301": [
+  {
+   "circuit_image": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Track%20icons%204x3/Qatar%20carbon.png",
+   "circuit_info_url": "https://api.multiviewer.app/api/v1/circuits/150/2026",
+   "circuit_key": 150,
+   "circuit_short_name": "Lusail",
+   "circuit_type": "Permanent",
+   "country_code": "QAT",
+   "country_flag": "https://media.formula1.com/content/dam/fom-website/2018-redesign-assets/Flags%2016x9/qatar-flag.png",
+   "country_key": 149,
+   "country_name": "Qatar",
+   "date_end": "2026-11-29T18:00:00+00:00",
+   "date_start": "2026-11-27T13:30:00+00:00",
+   "gmt_offset": "03:00:00",
+   "is_cancelled": false,
+   "location": "Lusail",
+   "meeting_key": 1301,
+   "meeting_name": "Qatar Grand Prix",
+   "meeting_official_name": "FORMULA 1 QATAR AIRWAYS QATAR GRAND PRIX 2026",
+   "year": 2026
+  }
+ ],
  "sessions?year=2026": [
   {
    "circuit_key": 63,
